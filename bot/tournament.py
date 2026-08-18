@@ -189,10 +189,31 @@ async def cmd_join_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not ok:
         await update.message.reply_text("❌ Registration failed or the tournament just became full.")
         return
+    registered_count = len(tournament.get("players", [])) + 1
     await update.message.reply_text(
         f"✅ <b>You are registered!</b>\n\n🏆 {escape(tournament['title'])}\n"
-        f"👥 Registered players: {len(tournament.get('players', [])) + 1}/{max_players or '∞'}",
+        f"👥 Registered players: {registered_count}/{max_players or '∞'}",
         parse_mode="HTML")
+
+    # Announce every successful registration in the official tournament group.
+    player_name = display_name_from_db({
+        "first_name": user.first_name or "",
+        "username": user.username or "",
+    })
+    group_name = escape(tournament.get("title") or "Tournament")
+    try:
+        await context.bot.send_message(
+            chat_id=tournament["group_id"],
+            text=(
+                f"🎟️ <b>New Tournament Player Joined!</b>\n\n"
+                f"🏆 <b>{group_name}</b>\n"
+                f"👤 <b>{escape(player_name)}</b> has joined the tournament.\n"
+                f"👥 <b>Registered:</b> {registered_count}/{max_players or '∞'}"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
 
 async def start_tournament(context, tournament):

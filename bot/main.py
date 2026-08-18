@@ -301,17 +301,20 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not source and not context.args:
         await update.message.reply_text(
             "Usage:\n"
-            "• Reply to a message with /broadcast to forward it to all users\n"
-            "• /broadcast <text> to send a plain message"
+            "• Reply to a message with /broadcast to send it to all players and groups\n"
+            "• /broadcast <text> to send a plain message to all players and groups"
         )
         return
 
     user_ids = await db.get_all_user_ids()
-    sent = failed = 0
+    group_ids = await db.get_all_group_chat_ids()
 
     status_msg = await update.message.reply_text(
-        f"📡 Broadcasting to <b>{len(user_ids)}</b> users...", parse_mode="HTML"
+        f"📡 Broadcasting to <b>{len(user_ids)}</b> players and <b>{len(group_ids)}</b> Telegram groups...",
+        parse_mode="HTML",
     )
+
+    sent_users = failed_users = sent_groups = failed_groups = 0
 
     for uid in user_ids:
         try:
@@ -319,15 +322,28 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await source.copy(chat_id=uid)
             else:
                 await context.bot.send_message(
-                    chat_id=uid,
-                    text=" ".join(context.args),
-                    parse_mode="HTML",
+                    chat_id=uid, text=" ".join(context.args), parse_mode="HTML"
                 )
-            sent += 1
+            sent_users += 1
         except (Forbidden, BadRequest):
-            failed += 1
+            failed_users += 1
         except Exception:
-            failed += 1
+            failed_users += 1
+        await asyncio.sleep(0.05)
+
+    for gid in group_ids:
+        try:
+            if source:
+                await source.copy(chat_id=gid)
+            else:
+                await context.bot.send_message(
+                    chat_id=gid, text=" ".join(context.args), parse_mode="HTML"
+                )
+            sent_groups += 1
+        except (Forbidden, BadRequest):
+            failed_groups += 1
+        except Exception:
+            failed_groups += 1
         await asyncio.sleep(0.05)
 
     try:
@@ -335,8 +351,8 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📡 <b>Broadcast Complete!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📨 Sent: <b>{sent}</b>\n"
-            f"❌ Failed: <b>{failed}</b>\n\n"
+            f"👤 <b>Player DMs</b>\n📨 Sent: <b>{sent_users}</b>\n❌ Failed: <b>{failed_users}</b>\n\n"
+            f"👥 <b>Telegram Groups</b>\n📨 Sent: <b>{sent_groups}</b>\n❌ Failed: <b>{failed_groups}</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━",
             parse_mode="HTML",
         )
@@ -446,9 +462,6 @@ async def cmd_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not LOGGER_GROUP_ID:
-        return
-
     result = update.my_chat_member
     if not result:
         return
@@ -463,6 +476,17 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
 
     chat = result.chat
     if chat.type not in ("group", "supergroup"):
+        return
+
+    if new_status in ("member", "administrator"):
+        await db.register_group_chat(chat.id, chat.title or "", chat.username or "")
+
+    if new_status not in ("member", "administrator"):
+        return
+    if old_status in ("member", "administrator"):
+        return
+
+    if not LOGGER_GROUP_ID:
         return
 
     added_by = result.from_user

@@ -46,6 +46,7 @@ async def init_db():
     await db["game_results"].create_index([("won", 1), ("created_at", -1)])
     await db["tournaments"].create_index("status")
     await db["tournaments"].create_index([("players", 1)])
+    await db["chats"].create_index("chat_id", unique=True)
 
 
 async def get_user(telegram_id: int) -> Optional[Dict]:
@@ -71,6 +72,46 @@ async def create_user(telegram_id: int, username: str, first_name: str):
         }},
         upsert=True,
     )
+
+
+
+
+async def register_group_chat(chat_id: int, title: str = "", username: str = ""):
+    """Remember a Telegram group/supergroup where the bot is installed/used."""
+    if not chat_id:
+        return
+    await _col("chats").update_one(
+        {"chat_id": chat_id},
+        {"$set": {
+            "chat_id": chat_id,
+            "title": title or "",
+            "username": username or "",
+            "updated_at": datetime.now(timezone.utc),
+        }, "$setOnInsert": {
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+
+
+async def get_all_group_chat_ids() -> List[int]:
+    """Return all known group/supergroup chat IDs for owner broadcasts.
+
+    Includes chats explicitly registered and every chat that has ever hosted
+    a Bingo room, so existing groups are not lost across restarts.
+    """
+    ids = set()
+    docs = await _col("chats").find(
+        {"chat_id": {"$exists": True}}, {"chat_id": 1, "_id": 0}
+    ).to_list(length=None)
+    ids.update(d["chat_id"] for d in docs if d.get("chat_id"))
+
+    room_docs = await _col("rooms").find(
+        {"chat_id": {"$exists": True}}, {"chat_id": 1, "_id": 0}
+    ).to_list(length=None)
+    ids.update(d["chat_id"] for d in room_docs if d.get("chat_id"))
+
+    return list(ids)
 
 
 async def get_all_user_ids() -> List[int]:

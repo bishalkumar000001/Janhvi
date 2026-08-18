@@ -47,6 +47,37 @@ async def init_db():
     await db["tournaments"].create_index("status")
     await db["tournaments"].create_index([("players", 1)])
     await db["chats"].create_index("chat_id", unique=True)
+    await db["sudo_users"].create_index("telegram_id", unique=True)
+
+
+async def is_sudo_user(telegram_id: int) -> bool:
+    """Return True when a user has been granted dynamic owner-level access."""
+    doc = await _col("sudo_users").find_one({"telegram_id": int(telegram_id)})
+    return doc is not None
+
+
+async def add_sudo_user(telegram_id: int, added_by: int):
+    await _col("sudo_users").update_one(
+        {"telegram_id": int(telegram_id)},
+        {"$set": {
+            "telegram_id": int(telegram_id),
+            "added_by": int(added_by),
+            "updated_at": datetime.now(timezone.utc),
+        }, "$setOnInsert": {
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+
+
+async def remove_sudo_user(telegram_id: int) -> bool:
+    result = await _col("sudo_users").delete_one({"telegram_id": int(telegram_id)})
+    return result.deleted_count > 0
+
+
+async def get_sudo_user_ids() -> List[int]:
+    docs = await _col("sudo_users").find({}, {"telegram_id": 1, "_id": 0}).to_list(length=None)
+    return [int(d["telegram_id"]) for d in docs if d.get("telegram_id") is not None]
 
 
 async def get_user(telegram_id: int) -> Optional[Dict]:

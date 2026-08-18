@@ -16,8 +16,13 @@ TOURNAMENT_GROUP_ID = os.environ.get("TOURNAMENT_GROUP_ID", "").strip()
 TOURNAMENT_GROUP_LINK = os.environ.get("TOURNAMENT_GROUP_LINK", "").strip()
 
 
-def _is_owner(user_id: int) -> bool:
-    return OWNER_ID and user_id == OWNER_ID
+async def _is_owner(user_id: int) -> bool:
+    if OWNER_ID and user_id == OWNER_ID:
+        return True
+    try:
+        return await db.is_sudo_user(user_id)
+    except Exception:
+        return False
 
 
 def _fmt_start(value):
@@ -103,7 +108,7 @@ async def _send_tournament_wizard(update, context):
 
 async def handle_tournament_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not _is_owner(query.from_user.id):
+    if not await _is_owner(query.from_user.id):
         await query.answer("Only the bot owner can use this.", show_alert=True)
         return
     if query.message.chat.type != "private":
@@ -200,7 +205,7 @@ async def handle_tournament_callback(update: Update, context: ContextTypes.DEFAU
 async def handle_tournament_wizard_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_chat.type != "private":
         return False
-    if not _is_owner(update.effective_user.id):
+    if not await _is_owner(update.effective_user.id):
         return False
     step = context.user_data.get("tournament_wizard_step")
     if not step or "tournament_wizard" not in context.user_data:
@@ -303,7 +308,7 @@ async def cmd_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
 
-    if not _is_owner(user.id):
+    if not await _is_owner(user.id):
         await update.message.reply_text("🚫 Only the bot owner can manage tournaments.")
         return
     if update.effective_chat.type != "private":
@@ -515,7 +520,7 @@ async def start_tournament(context, tournament):
 
 async def cmd_round(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not _is_owner(user.id):
+    if not await _is_owner(user.id):
         await update.message.reply_text("🚫 Only the bot owner can use /round.")
         return
     if update.effective_chat.type != "private":

@@ -1,5 +1,6 @@
 import os
 import asyncio
+from html import escape
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -36,6 +37,99 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+async def has_owner_power(user_id: int) -> bool:
+    """Main owner or a dynamically-added SUDO user."""
+    if OWNER_ID and user_id == OWNER_ID:
+        return True
+    try:
+        return await db.is_sudo_user(user_id)
+    except Exception:
+        return False
+
+
+def is_main_owner(user_id: int) -> bool:
+    return bool(OWNER_ID and user_id == OWNER_ID)
+
+
+def is_logger_group(update: Update) -> bool:
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return False
+    try:
+        return bool(LOGGER_GROUP_ID and chat.id == int(LOGGER_GROUP_ID))
+    except (TypeError, ValueError):
+        return False
+
+
+async def cmd_addsudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Main owner-only SUDO management; restricted to LOGGER_GROUP_ID."""
+    user = update.effective_user
+    if not is_main_owner(user.id):
+        await update.message.reply_text("🚫 Only the main bot owner can manage SUDO users.")
+        return
+    if not is_logger_group(update):
+        await update.message.reply_text("🔒 /addsudo can only be used in the configured Logger Group.")
+        return
+    if not context.args or not context.args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /addsudo USER_ID")
+        return
+    target_id = int(context.args[0])
+    if target_id == OWNER_ID:
+        await update.message.reply_text("ℹ️ The main owner is already an owner.")
+        return
+    await db.add_sudo_user(target_id, user.id)
+    target = await db.get_user(target_id)
+    name = display_name_from_db(target) if target else str(target_id)
+    await update.message.reply_text(
+        f"👑 <b>SUDO USER ADDED</b>\n\n"
+        f"👤 <b>User:</b> {name}\n"
+        f"🆔 <b>ID:</b> <code>{target_id}</code>\n"
+        f"🔐 <b>Access:</b> Owner-level bot permissions\n\n"
+        f"Only the main owner can remove this access.",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_remsudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_main_owner(user.id):
+        await update.message.reply_text("🚫 Only the main bot owner can manage SUDO users.")
+        return
+    if not is_logger_group(update):
+        await update.message.reply_text("🔒 /remsudo can only be used in the configured Logger Group.")
+        return
+    if not context.args or not context.args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /remsudo USER_ID")
+        return
+    target_id = int(context.args[0])
+    removed = await db.remove_sudo_user(target_id)
+    await update.message.reply_text(
+        f"{'✅ SUDO USER REMOVED' if removed else 'ℹ️ User was not a SUDO user.'}\n"
+        f"🆔 <code>{target_id}</code>",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_sudolist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_main_owner(user.id):
+        await update.message.reply_text("🚫 Only the main bot owner can view SUDO users.")
+        return
+    if not is_logger_group(update):
+        await update.message.reply_text("🔒 /sudolist can only be used in the configured Logger Group.")
+        return
+    ids = await db.get_sudo_user_ids()
+    if not ids:
+        await update.message.reply_text("👑 <b>SUDO USERS</b>\n\nNo SUDO users have been added.", parse_mode="HTML")
+        return
+    lines = ["👑 <b>SUDO USERS</b>", ""]
+    for i, uid in enumerate(ids, 1):
+        target = await db.get_user(uid)
+        name = display_name_from_db(target) if target else "Unknown"
+        lines.append(f"{i}. {escape(name)} — <code>{uid}</code>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,8 +389,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    if not OWNER_ID or user.id != OWNER_ID:
-        await update.message.reply_text("❌ This command is for the bot owner only.")
+    if not await has_owner_power(user.id):
+        await update.message.reply_text("❌ This command is for the owner/SUDO only.")
         return
 
     source = update.message.reply_to_message
@@ -396,7 +490,7 @@ async def cmd_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Amount must be greater than 0!")
         return
     
-    if user.id != OWNER_ID and sender["coins"] < amount:
+    if not await has_owner_power(user.id) and sender["coins"] < amount:
         await update.message.reply_text(
             f"❌ You don't have enough coins!\n"
             f"You have: 💰 <b>{sender['coins']:,}</b>\n"
@@ -430,7 +524,7 @@ async def cmd_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Transfer coins
-    if user.id == OWNER_ID:
+    if await has_owner_power(user.id):
         success = await db.add_coins(
             recipient["telegram_id"],
             amount
@@ -626,6 +720,9 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("addsudo", cmd_addsudo))
+    app.add_handler(CommandHandler("remsudo", cmd_remsudo))
+    app.add_handler(CommandHandler("sudolist", cmd_sudolist))
     app.add_handler(CommandHandler("bingo", cmd_bingo))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("profile", cmd_profile))

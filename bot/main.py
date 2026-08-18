@@ -7,7 +7,9 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ChatMemberHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 from telegram.error import BadRequest, Forbidden
 from webserver import start_webserver
@@ -306,8 +308,11 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    user_ids = await db.get_all_user_ids()
-    group_ids = await db.get_all_group_chat_ids()
+    # Broadcast to every player DM we know and every group/supergroup the bot
+    # has learned from updates or from the configured tournament group.
+    # The official tournament group is not special: it is simply another saved group.
+    user_ids = list(dict.fromkeys(await db.get_all_user_ids()))
+    group_ids = list(dict.fromkeys(await db.get_all_group_chat_ids()))
 
     status_msg = await update.message.reply_text(
         f"📡 Broadcasting to <b>{len(user_ids)}</b> players and <b>{len(group_ids)}</b> Telegram groups...",
@@ -461,29 +466,56 @@ async def cmd_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+
+
+async def register_group_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Automatically remember every group/supergroup where the bot receives an update.
+
+    Telegram does not expose an API to list every group a bot belongs to. Therefore
+    every group is learned from normal updates. This works for groups where the bot
+    was installed before the broadcast feature existed as soon as the bot receives
+    any message/update from that group.
+    """
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+
+    try:
+        await db.register_group_chat(
+            chat.id,
+            chat.title or "",
+            getattr(chat, "username", "") or "",
+        )
+    except Exception as exc:
+        logger.warning("Could not register group %s for broadcasts: %s", chat.id, exc)
+
+
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.my_chat_member
     if not result:
         return
 
+    chat = result.chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+
     new_status = result.new_chat_member.status
     old_status = result.old_chat_member.status
 
-    if new_status not in ("member", "administrator"):
-        return
-    if old_status in ("member", "administrator"):
-        return
-
-    chat = result.chat
-    if chat.type not in ("group", "supergroup"):
-        return
-
+    # As soon as the bot becomes a member/admin, remember this group.
     if new_status in ("member", "administrator"):
-        await db.register_group_chat(chat.id, chat.title or "", chat.username or "")
+        try:
+            await db.register_group_chat(
+                chat.id,
+                chat.title or "",
+                getattr(chat, "username", "") or "",
+            )
+            logger.info("Registered group %s (%s) for broadcasts.", chat.id, chat.title or chat.id)
+        except Exception as exc:
+            logger.warning("Could not register newly joined group %s: %s", chat.id, exc)
 
-    if new_status not in ("member", "administrator"):
-        return
-    if old_status in ("member", "administrator"):
+    # Only send the detailed add-to-group log on an actual membership transition.
+    if new_status not in ("member", "administrator") or old_status in ("member", "administrator"):
         return
 
     if not LOGGER_GROUP_ID:
@@ -558,6 +590,26 @@ async def post_init(application: Application):
     await db.init_db()
     logger.info("Database initialized.")
 
+    # Always register the configured official tournament group at startup.
+    # This fixes broadcasts showing 0 groups when the bot was added before this feature.
+    tournament_group_id = os.environ.get("TOURNAMENT_GROUP_ID", "").strip()
+    if tournament_group_id:
+        try:
+            chat_id = int(tournament_group_id)
+            chat = await application.bot.get_chat(chat_id)
+            await db.register_group_chat(
+                chat.id,
+                chat.title or "",
+                getattr(chat, "username", "") or "",
+            )
+            logger.info("Registered official tournament group %s for broadcasts.", chat.id)
+        except Exception as exc:
+            logger.warning(
+                "Could not register TOURNAMENT_GROUP_ID %s: %s",
+                tournament_group_id,
+                exc,
+            )
+
 
 def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -583,6 +635,12 @@ def main():
     app.add_handler(CommandHandler("round", cmd_round))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CommandHandler("give", cmd_give))
+    # Track any group where the bot receives a message. This also discovers groups
+    # that existed before the bot's MY_CHAT_MEMBER handler was installed.
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS, register_group_activity),
+        group=-1,
+    )
     app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_callback))
 

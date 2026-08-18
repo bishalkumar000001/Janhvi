@@ -51,6 +51,159 @@ async def _send_tournament_info(bot, chat_id, tournament):
     await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
 
 
+def _wizard_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏆 Tournament Name", callback_data="tw:title")],
+        [InlineKeyboardButton("🎁 Prize", callback_data="tw:prize"),
+         InlineKeyboardButton("⏰ Start Time", callback_data="tw:start")],
+        [InlineKeyboardButton("👥 Max Players", callback_data="tw:max"),
+         InlineKeyboardButton("📜 Rules", callback_data="tw:rules")],
+        [InlineKeyboardButton("👀 Preview", callback_data="tw:preview")],
+        [InlineKeyboardButton("✅ Create Tournament", callback_data="tw:create")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="tw:cancel")],
+    ])
+
+
+def _wizard_text(data):
+    return (
+        "🏆 <b>Create Tournament</b>\n\n"
+        f"🏆 <b>Name:</b> {escape(data.get('title') or 'Not set')}\n"
+        f"🎁 <b>Prize:</b> {escape(data.get('prize') or 'Not set')}\n"
+        f"⏰ <b>Start:</b> {escape(data.get('start_at') or 'Not set')}\n"
+        f"👥 <b>Max Players:</b> {escape(str(data.get('max_players') or 'Unlimited'))}\n"
+        f"📜 <b>Rules:</b> {escape(data.get('rules') or 'Not set')}\n\n"
+        "Tap a button to edit a field, then press <b>Create Tournament</b>."
+    )
+
+
+async def _send_tournament_wizard(update, context):
+    await update.message.reply_text(
+        _wizard_text(context.user_data["tournament_wizard"]),
+        parse_mode="HTML",
+        reply_markup=_wizard_keyboard(),
+    )
+
+
+async def handle_tournament_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_owner(query.from_user.id):
+        await query.answer("Only the bot owner can use this.", show_alert=True)
+        return
+    if query.message.chat.type != "private":
+        await query.answer("Use tournament controls in bot DM.", show_alert=True)
+        return
+    data = query.data
+    if not data.startswith("tw:"):
+        return
+    action = data.split(":", 1)[1]
+
+    if action == "cancel":
+        context.user_data.pop("tournament_wizard", None)
+        context.user_data.pop("tournament_wizard_step", None)
+        await query.edit_message_text("❌ Tournament creation cancelled.")
+        await query.answer()
+        return
+
+    wizard = context.user_data.setdefault("tournament_wizard", {
+        "title": "", "prize": "", "start_at": "", "max_players": "",
+        "rules": "Single-elimination Bingo tournament. Winners advance to the next round."
+    })
+
+    prompts = {
+        "title": "🏆 Send the tournament name:",
+        "prize": "🎁 Send the prize (cash, Premium, NFT, Telegram IDs, etc.):",
+        "start": "⏰ Send the tournament start date/time:",
+        "max": "👥 Send maximum players, or type <code>0</code> for unlimited:",
+        "rules": "📜 Send the tournament rules:",
+    }
+    if action in prompts:
+        context.user_data["tournament_wizard_step"] = action
+        await query.answer()
+        await query.message.reply_text(prompts[action], parse_mode="HTML")
+        return
+
+    if action == "preview":
+        await query.answer()
+        await query.message.reply_text(_wizard_text(wizard), parse_mode="HTML", reply_markup=_wizard_keyboard())
+        return
+
+    if action == "create":
+        if not wizard.get("title") or not wizard.get("prize"):
+            await query.answer("Set Tournament Name and Prize first.", show_alert=True)
+            return
+        if await _active_tournament():
+            await query.answer("An active tournament already exists.", show_alert=True)
+            return
+        if not TOURNAMENT_GROUP_ID:
+            await query.answer("TOURNAMENT_GROUP_ID is not configured.", show_alert=True)
+            return
+        max_players = None
+        raw_max = str(wizard.get("max_players") or "").strip()
+        if raw_max and raw_max != "0":
+            try:
+                max_players = int(raw_max)
+                if max_players < 2:
+                    raise ValueError
+            except ValueError:
+                await query.answer("Max players must be 0 or a number >= 2.", show_alert=True)
+                return
+        created = await db.create_tournament(
+            title=wizard["title"].strip(),
+            prize=wizard["prize"].strip(),
+            start_at=wizard.get("start_at") or None,
+            max_players=max_players,
+            rules=wizard.get("rules") or "Single-elimination Bingo tournament.",
+            group_id=TOURNAMENT_GROUP_ID,
+        )
+        context.user_data.pop("tournament_wizard", None)
+        context.user_data.pop("tournament_wizard_step", None)
+        await query.edit_message_text(
+            f"✅ <b>Tournament Created!</b>\n\n"
+            f"🏆 {escape(created['title'])}\n"
+            f"🎁 {escape(created['prize'])}\n"
+            f"⏰ {escape(_fmt_start(created.get('start_at')))}\n"
+            f"👥 {created.get('max_players') or 'Unlimited'} players\n\n"
+            f"Players can now use /join in DM after joining the official group.\n"
+            f"Use <code>/tournament announce</code> to announce it.",
+            parse_mode="HTML",
+        )
+        await query.answer("Tournament created!")
+        return
+    await query.answer()
+
+
+async def handle_tournament_wizard_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or update.effective_chat.type != "private":
+        return False
+    if not _is_owner(update.effective_user.id):
+        return False
+    step = context.user_data.get("tournament_wizard_step")
+    if not step or "tournament_wizard" not in context.user_data:
+        return False
+    value = (update.message.text or "").strip()
+    if not value:
+        await update.message.reply_text("❌ Please send text.")
+        return True
+    wizard = context.user_data["tournament_wizard"]
+    if step == "max":
+        if value.lower() in ("0", "unlimited", "∞"):
+            wizard["max_players"] = ""
+        else:
+            try:
+                n = int(value)
+                if n < 2:
+                    raise ValueError
+                wizard["max_players"] = str(n)
+            except ValueError:
+                await update.message.reply_text("❌ Max players must be 0 (unlimited) or a number >= 2.")
+                return True
+    else:
+        wizard[step] = value
+    context.user_data.pop("tournament_wizard_step", None)
+    await update.message.reply_text(_wizard_text(wizard), parse_mode="HTML", reply_markup=_wizard_keyboard())
+    return True
+
+
 async def cmd_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
@@ -84,6 +237,13 @@ async def cmd_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ An active tournament already exists. Cancel it first.")
             return
         payload = update.message.text.partition("create")[2].strip()
+        if not payload:
+            context.user_data["tournament_wizard"] = {
+                "title": "", "prize": "", "start_at": "", "max_players": "",
+                "rules": "Single-elimination Bingo tournament. Winners advance to the next round."
+            }
+            await _send_tournament_wizard(update, context)
+            return
         parts = [p.strip() for p in payload.split("|")]
         if len(parts) < 2:
             await update.message.reply_text(
@@ -139,8 +299,31 @@ async def cmd_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if TOURNAMENT_GROUP_LINK:
             text += f"\n\n🔗 {escape(TOURNAMENT_GROUP_LINK)}"
-        await context.bot.send_message(chat_id=t["group_id"], text=text, parse_mode="HTML")
-        await update.message.reply_text("📢 Tournament announcement sent to the official group.")
+        # Send the tournament announcement to every registered player in DM,
+        # and ONLY to the official Bingo/tournament group. Do not broadcast this
+        # announcement to other groups where the bot is installed.
+        user_ids = list(dict.fromkeys(await db.get_all_user_ids()))
+        sent_users = failed_users = 0
+        for uid in user_ids:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+                sent_users += 1
+            except Exception:
+                failed_users += 1
+
+        sent_group = 0
+        try:
+            await context.bot.send_message(chat_id=t["group_id"], text=text, parse_mode="HTML")
+            sent_group = 1
+        except Exception:
+            pass
+
+        await update.message.reply_text(
+            f"📢 <b>Tournament announcement sent!</b>\n\n"
+            f"👤 Player DMs: <b>{sent_users}</b> sent, <b>{failed_users}</b> failed\n"
+            f"🏆 Official Bingo Group: <b>{'Sent' if sent_group else 'Failed'}</b>",
+            parse_mode="HTML",
+        )
     elif action == "start":
         await start_tournament(context, t)
         await update.message.reply_text("🚀 Tournament start command processed.")
@@ -207,7 +390,8 @@ async def cmd_join_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=(
                 f"🎟️ <b>New Tournament Player Joined!</b>\n\n"
                 f"🏆 <b>{group_name}</b>\n"
-                f"👤 <b>{escape(player_name)}</b> has joined the tournament.\n"
+                f"👤 <b>{escape(player_name)}</b>\n"
+                f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
                 f"👥 <b>Registered:</b> {registered_count}/{max_players or '∞'}"
             ),
             parse_mode="HTML",

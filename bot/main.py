@@ -28,7 +28,7 @@ from game import (
 from economy import award_winner, record_loss, process_forfeit
 from leaderboard import build_leaderboard_text, build_leaderboard_keyboard
 from utils import display_name_from_db, display_name
-from tournament import cmd_tournament, cmd_join_tournament, cmd_round
+from tournament import cmd_tournament, cmd_join_tournament, cmd_round, handle_tournament_callback, handle_tournament_wizard_message
 from models import LINES_TO_WIN, WIN_COINS, FORFEIT_COST, CANCEL_FREE_THRESHOLD, OWNER_ID, LOGGER_GROUP_ID, SUPPORT_CHANNEL
 
 logging.basicConfig(
@@ -564,7 +564,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
 
-    if data.startswith("join:"):
+    if data.startswith("tw:"):
+        await handle_tournament_callback(update, context)
+    elif data.startswith("join:"):
         await handle_join_callback(update, context)
     elif data.startswith("cancel_room:"):
         await handle_cancel_room_callback(update, context)
@@ -635,6 +637,12 @@ def main():
     app.add_handler(CommandHandler("round", cmd_round))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CommandHandler("give", cmd_give))
+    # Owner-only tournament creation wizard field input.
+    app.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+                       handle_tournament_wizard_message),
+        group=0,
+    )
     # Track any group where the bot receives a message. This also discovers groups
     # that existed before the bot's MY_CHAT_MEMBER handler was installed.
     app.add_handler(

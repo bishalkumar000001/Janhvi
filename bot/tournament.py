@@ -1,6 +1,7 @@
 import os
 import random
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from html import escape
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -69,7 +70,7 @@ def _wizard_text(data):
         "🏆 <b>Create Tournament</b>\n\n"
         f"🏆 <b>Name:</b> {escape(data.get('title') or 'Not set')}\n"
         f"🎁 <b>Prize:</b> {escape(data.get('prize') or 'Not set')}\n"
-        f"⏰ <b>Start:</b> {escape(data.get('start_at') or 'Not set')}\n"
+        f"⏰ <b>Start:</b> {escape(data.get('start_display') or data.get('start_at') or 'Not set')}\n"
         f"👥 <b>Max Players:</b> {escape(str(data.get('max_players') or 'Unlimited'))}\n"
         f"📜 <b>Rules:</b> {escape(data.get('rules') or 'Not set')}\n\n"
         "Tap a button to edit a field, then press <b>Create Tournament</b>."
@@ -112,10 +113,15 @@ async def handle_tournament_callback(update: Update, context: ContextTypes.DEFAU
     prompts = {
         "title": "🏆 Send the tournament name:",
         "prize": "🎁 Send the prize (cash, Premium, NFT, Telegram IDs, etc.):",
-        "start": "⏰ Send the tournament start date/time:",
+        "start": "📅 Send the tournament date in <code>DD/MM/YYYY</code> format.\n\nExample: <code>25/08/2026</code>",
         "max": "👥 Send maximum players, or type <code>0</code> for unlimited:",
         "rules": "📜 Send the tournament rules:",
     }
+    if action == "start":
+        context.user_data["tournament_wizard_step"] = "start_date"
+        await query.answer()
+        await query.message.reply_text(prompts["start"], parse_mode="HTML")
+        return
     if action in prompts:
         context.user_data["tournament_wizard_step"] = action
         await query.answer()
@@ -130,6 +136,9 @@ async def handle_tournament_callback(update: Update, context: ContextTypes.DEFAU
     if action == "create":
         if not wizard.get("title") or not wizard.get("prize"):
             await query.answer("Set Tournament Name and Prize first.", show_alert=True)
+            return
+        if not wizard.get("start_at"):
+            await query.answer("Set the tournament start date and time first.", show_alert=True)
             return
         if await _active_tournament():
             await query.answer("An active tournament already exists.", show_alert=True)
@@ -180,11 +189,76 @@ async def handle_tournament_wizard_message(update: Update, context: ContextTypes
     step = context.user_data.get("tournament_wizard_step")
     if not step or "tournament_wizard" not in context.user_data:
         return False
+
     value = (update.message.text or "").strip()
     if not value:
         await update.message.reply_text("❌ Please send text.")
         return True
+
     wizard = context.user_data["tournament_wizard"]
+
+    if step == "start_date":
+        try:
+            date_value = datetime.strptime(value, "%d/%m/%Y").date()
+            today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+            if date_value < today:
+                await update.message.reply_text(
+                    "❌ That date has already passed.\n\n"
+                    "Use <code>DD/MM/YYYY</code>. Example: <code>25/08/2026</code>.",
+                    parse_mode="HTML",
+                )
+                return True
+            wizard["start_date"] = value
+            context.user_data["tournament_wizard_step"] = "start_time"
+            await update.message.reply_text(
+                "⏰ Now send the tournament start time in <code>HH:MM AM/PM</code> format.\n\n"
+                "Example: <code>08:00 PM</code>\n"
+                "🇮🇳 Time zone: <b>IST (Asia/Kolkata)</b>",
+                parse_mode="HTML",
+            )
+            return True
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Invalid date. Use exactly <code>DD/MM/YYYY</code>.\n"
+                "Example: <code>25/08/2026</code>.",
+                parse_mode="HTML",
+            )
+            return True
+
+    if step == "start_time":
+        try:
+            time_value = datetime.strptime(value.upper(), "%I:%M %p").time()
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Invalid time. Use <code>HH:MM AM/PM</code>.\n"
+                "Example: <code>08:00 PM</code>.",
+                parse_mode="HTML",
+            )
+            return True
+
+        date_value = datetime.strptime(wizard["start_date"], "%d/%m/%Y").date()
+        ist = ZoneInfo("Asia/Kolkata")
+        start_dt = datetime.combine(date_value, time_value, tzinfo=ist)
+        now_ist = datetime.now(ist)
+        if start_dt <= now_ist:
+            await update.message.reply_text(
+                "❌ That date/time has already passed. Please enter a future time.",
+                parse_mode="HTML",
+            )
+            return True
+
+        wizard["start_at"] = start_dt.isoformat()
+        wizard["start_display"] = start_dt.strftime("%d %b %Y, %I:%M %p IST")
+        context.user_data.pop("tournament_wizard_step", None)
+        await update.message.reply_text(
+            f"✅ Start time saved: <b>{escape(wizard['start_display'])}</b>",
+            parse_mode="HTML",
+        )
+        await update.message.reply_text(
+            _wizard_text(wizard), parse_mode="HTML", reply_markup=_wizard_keyboard()
+        )
+        return True
+
     if step == "max":
         if value.lower() in ("0", "unlimited", "∞"):
             wizard["max_players"] = ""
@@ -195,12 +269,17 @@ async def handle_tournament_wizard_message(update: Update, context: ContextTypes
                     raise ValueError
                 wizard["max_players"] = str(n)
             except ValueError:
-                await update.message.reply_text("❌ Max players must be 0 (unlimited) or a number >= 2.")
+                await update.message.reply_text(
+                    "❌ Max players must be 0 (unlimited) or a number >= 2."
+                )
                 return True
     else:
         wizard[step] = value
+
     context.user_data.pop("tournament_wizard_step", None)
-    await update.message.reply_text(_wizard_text(wizard), parse_mode="HTML", reply_markup=_wizard_keyboard())
+    await update.message.reply_text(
+        _wizard_text(wizard), parse_mode="HTML", reply_markup=_wizard_keyboard()
+    )
     return True
 
 

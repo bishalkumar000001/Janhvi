@@ -21,11 +21,27 @@ def _is_owner(user_id: int) -> bool:
 
 
 def _fmt_start(value):
+    """Format tournament start time for users (12-hour IST display)."""
     if not value:
         return "Not specified"
-    if isinstance(value, datetime):
-        return value.astimezone().strftime("%d %b %Y, %I:%M %p")
-    return str(value)
+
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            # Stored tournament times are ISO-8601 strings, e.g.
+            # 2026-08-25T20:00:00+05:30.
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            return str(value)
+
+        ist = ZoneInfo("Asia/Kolkata")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ist)
+        dt = dt.astimezone(ist)
+        return dt.strftime("%d %b %Y, %I:%M %p IST")
+    except (ValueError, TypeError):
+        return str(value)
 
 
 async def _active_tournament():
